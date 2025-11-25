@@ -3,37 +3,47 @@ import numpy as np
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-import geopandas as gpd
-import rioxarray
-import os
 from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
 from scipy.ndimage import gaussian_filter
+import geopandas as gpd
+import rioxarray
+import intake
+import s3fs
+import os
 
-# === Settings ===
 target_years = [2023, 2024, 2025, 2026, 2027]
 Tc_celsius = 7.2
 processed_data_filename = "2025_585_ensemble_chill_hours.nc"
-# Added shapefile path to match the other script
-shapefile_path = r"C:\Users\Josh\Documents\ChillResearch\Fruit_Nuts\Fruits_Nuts.shp"
+shapefile_path = r"fruit_nuts_vineyard\fruits_nuts_vineyard.shp"
+base_dir = "loca2_west"
+
+# Choose scenario here
+scenario = "ssp585"  # or "ssp585"
 
 model_files = {
     "MIROC6": {
-        "tasmin": "tasmin.MIROC6.ssp585.r1i1p1f1.2015-2044.LOCA_16thdeg_v20220413.west.nc",
-        "tasmax": "tasmax.MIROC6.ssp585.r1i1p1f1.2015-2044.LOCA_16thdeg_v20220413.west.nc"
+        "tasmin": f"{base_dir}/tasmin.MIROC6.{scenario}.r1i1p1f1.2015-2044.LOCA_16thdeg_v20220413_west.nc",
+        "tasmax": f"{base_dir}/tasmax.MIROC6.{scenario}.r1i1p1f1.2015-2044.LOCA_16thdeg_v20220413_west.nc",
     },
     "CanESM5": {
-        "tasmin": "tasmin.CanESM5.ssp585.r1i1p1f1.2015-2044.LOCA_16thdeg_v20220413.west.nc",
-        "tasmax": "tasmax.CanESM5.ssp585.r1i1p1f1.2015-2044.LOCA_16thdeg_v20220413.west.nc"
+        "tasmin": f"{base_dir}/tasmin.CanESM5.{scenario}.r1i1p1f1.2015-2044.LOCA_16thdeg_v20220413_west.nc",
+        "tasmax": f"{base_dir}/tasmax.CanESM5.{scenario}.r1i1p1f1.2015-2044.LOCA_16thdeg_v20220413_west.nc",
     },
     "HadGEM3-GC31-LL": {
-        "tasmin": "tasmin.HadGEM3-GC31-LL.ssp585.r1i1p1f3.2015-2044.LOCA_16thdeg_v20220413.west.nc",
-        "tasmax": "tasmax.HadGEM3-GC31-LL.ssp585.r1i1p1f3.2015-2044.LOCA_16thdeg_v20220413.west.nc"
+        "tasmin": f"{base_dir}/tasmin.HadGEM3-GC31-LL.{scenario}.r1i1p1f3.2015-2044.LOCA_16thdeg_v20220413_west.nc",
+        "tasmax": f"{base_dir}/tasmax.HadGEM3-GC31-LL.{scenario}.r1i1p1f3.2015-2044.LOCA_16thdeg_v20220413_west.nc",
     },
     "CNRM-CM6-1": {
-        "tasmin": "tasmin.CNRM-CM6-1.ssp585.r1i1p1f2.2015-2044.LOCA_16thdeg_v20220413.west.nc",
-        "tasmax": "tasmax.CNRM-CM6-1.ssp585.r1i1p1f2.2015-2044.LOCA_16thdeg_v20220413.west.nc"
-    }
+        "tasmin": f"{base_dir}/tasmin.CNRM-CM6-1.{scenario}.r1i1p1f2.2015-2044.LOCA_16thdeg_v20220413_west.nc",
+        "tasmax": f"{base_dir}/tasmax.CNRM-CM6-1.{scenario}.r1i1p1f2.2015-2044.LOCA_16thdeg_v20220413_west.nc",
+    },
 }
+# ...existing code...
+
+def open_merged(path, varname):
+    """Open one merged LOCA2 NetCDF file and return the requested variable."""
+    ds = xr.open_dataset(path)
+    return ds[varname]
 
 # === Function to estimate hourly temperatures ===
 def get_hourly_temperatures(tmin_day, tmax_day, Tc):
@@ -90,8 +100,7 @@ def compute_corrected_chill_hours_weinberger(tasmin, tasmax, smoothing_sigma=5):
 # === Main processing loop OR Load from file ===
 if os.path.exists(processed_data_filename):
     print(f"Loading processed data from '{processed_data_filename}'...")
-    ds = xr.open_dataset(processed_data_filename)
-    ensemble_avg = ds['__xarray_dataarray_variable__']
+    ensemble_avg = xr.open_dataarray(processed_data_filename)
     print("Data loaded successfully.")
 else:
     print(f"Processed data file not found. Running full computation...")
@@ -100,18 +109,29 @@ else:
     for model_name, paths in model_files.items():
         print(f"Processing: {model_name}")
         try:
-            ds_min_full, ds_max_full = xr.open_dataset(paths["tasmin"])["tasmin"], xr.open_dataset(paths["tasmax"])["tasmax"]
+            # Use your merge helper instead of open_dataset
+            ds_min_full = open_merged(paths["tasmin"], "tasmin")
+            ds_max_full = open_merged(paths["tasmax"], "tasmax")
+
             chill_stack = []
             for year in target_years:
                 start_year_selection, end_year_selection = year - 1, year
                 time_mask = ((ds_min_full.time.dt.year == start_year_selection) & (ds_min_full.time.dt.month.isin([11, 12]))) | \
                             ((ds_min_full.time.dt.year == end_year_selection) & (ds_min_full.time.dt.month.isin([1, 2])))
-                tasmin_season, tasmax_season = ds_min_full.isel(time=time_mask), ds_max_full.isel(time=time_mask)
-                chill = compute_corrected_chill_hours_weinberger(tasmin_season.sortby('time'), tasmax_season.sortby('time'))
+
+                tasmin_season = ds_min_full.isel(time=time_mask)
+                tasmax_season = ds_max_full.isel(time=time_mask)
+
+                chill = compute_corrected_chill_hours_weinberger(
+                    tasmin_season.sortby('time'),
+                    tasmax_season.sortby('time')
+                )
                 chill_stack.append(chill)
+
             avg_chill = sum(chill_stack) / len(chill_stack)
             ensemble_sum = avg_chill if ensemble_sum is None else ensemble_sum + avg_chill
             model_count += 1
+
         except Exception as e:
             print(f"Error processing {model_name}: {e}. Skipping.")
             continue
@@ -125,7 +145,7 @@ else:
         print("No models processed. Exiting.")
         exit()
 
-# === Final Data Prep, Clipping, Plotting, and Acreage Calculation ===
+# === Final Data Prep and Plotting ===
 # Convert longitude from 0-360 to -180-180 for compatibility
 ensemble_avg.coords['lon'] = (ensemble_avg.coords['lon'] + 180) % 360 - 180
 ensemble_avg = ensemble_avg.sortby(ensemble_avg.lon)
@@ -142,10 +162,11 @@ clipped_chill_hours = ensemble_avg.rio.clip(fruit_nuts_area.geometry.values, all
 
 # --- Plotting Section ---
 fig, ax = plt.subplots(figsize=(12, 8), subplot_kw={'projection': ccrs.PlateCarree()})
+
 clipped_chill_hours.plot.pcolormesh(
     ax=ax,
     transform=ccrs.PlateCarree(),
-    cmap='YlGnBu', 
+    cmap='YlGnBu',
     vmin = 200,
     vmax = 1200,
     cbar_kwargs={'label': 'Avg Corrected Chill Hours'}
@@ -155,8 +176,7 @@ ax.add_feature(cfeature.COASTLINE, linewidth=1.0)
 ax.add_feature(cfeature.BORDERS, linestyle=':', edgecolor='gray')
 minx, miny, maxx, maxy = fruit_nuts_area.total_bounds
 ax.set_extent([minx - 1, maxx + 1, miny - 1, maxy + 1], crs=ccrs.PlateCarree())
-# Updated title for SSP5-8.5 scenario
-ax.set_title("Ensemble Chill Hours (Nov-Feb, 2023-2027) for Fruit and Nuts Area - SSP5-8.5", fontsize=12)
+ax.set_title("Ensemble Chill Hours (Nov-Feb, 2023-2027) for Fruit and Nuts Area", fontsize=12)
 gl = ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
 gl.top_labels, gl.right_labels = False, False
 gl.xformatter, gl.yformatter = LongitudeFormatter(), LatitudeFormatter()
@@ -171,18 +191,19 @@ crops = {
     "Almonds": (200, 300),
     "Pistachios": (800, 1200),
     "Peaches": (650, 850),
-    "Plums": (700, 1000)
+    "Plums": (700, 1000), 
+    "Wine Grapes": (200, 400)
 }
 
 print("\n" + "="*60)
 print("Calculating Acreage for Specific Crop Chill Hour Requirements")
-print(f"Scenario: SSP5-8.5, 2025")
+print(f"Scenario: SSP2-4.5, 2025")
 print(f"Shapefile: {os.path.basename(shapefile_path)}")
 print("-"*60)
 print(f"{'Crop':<12} | {'Chill Range':<15} | {'Total Acres'}")
 print("-"*60)
 
-# Calculate area of each grid cell 
+# Calculate area of each grid cell (reusable for all crops)
 R = 6371.0  # Earth radius in km
 lat_res = abs(clipped_chill_hours['lat'][1].item() - clipped_chill_hours['lat'][0].item())
 lon_res = abs(clipped_chill_hours['lon'][1].item() - clipped_chill_hours['lon'][0].item())
